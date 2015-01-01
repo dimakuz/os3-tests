@@ -4,7 +4,7 @@ TARGET=main
 C_SOURCES=$(wildcard *.c)
 C_OBJS=$(C_SOURCES:.c=.o)
 CFLAGS=-I. -I. -Wall -Werror -g3 -O0
-LDFLAGS=-static -L. -lmylist -lpthread
+LDFLAGS=-L. -lmylist -lpthread
 
 all: $(TARGET)
 
