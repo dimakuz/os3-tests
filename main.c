@@ -1,11 +1,17 @@
+#include <pthread.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <mylist.h>
 
-#define FUZZ
-#define SIM
+#ifndef FUZZ
+#define FUZZ 1
+#endif
+#ifndef SIM
+#define SIM 1
+#endif
 
 struct test_def {
 	int (*func)();
@@ -118,7 +124,7 @@ static int test_remove_success() {
 }
 
 static int _test_remove_failure(linked_list_t **list) {
-	return list_remove(list, 1) == 1;
+	return list_remove(list, 1) > 0;
 }
 static int test_remove_failure() {
 	return with_list(_test_remove_failure);
@@ -363,7 +369,175 @@ static int test_batch_compute() {
 	return with_list(_test_batch_compute);
 }
 
-#ifdef FUZZ
+static int _pipes[2];
+static void *long_compute(void *data) {
+	write(_pipes[1], "1", 1);
+	close(_pipes[1]);
+	sleep(2);
+	return NULL;
+}
+
+static void *compute_thread(void *data) {
+	void *res;
+	int ret = list_node_compute(
+		(linked_list_t **) data,
+		30,
+		long_compute,
+		&res
+	);
+	return (void *) *(int **) &ret;
+}
+
+static void *free_thread(void *data) {
+	linked_list_t **list = (linked_list_t **) data;
+	char c;
+	read(_pipes[0], &c, 1);
+	close(_pipes[0]);
+	list_free(&list);
+	return list;
+}
+
+static int with_freeing_list(int (*func)(linked_list_t **)) {
+	linked_list_t **list = list_alloc();
+	pthread_t compute_thread_handle;
+	pthread_t free_thread_handle;
+	void *thread_ret;
+	int ret = 1;
+	int i;
+	if (!list)
+		return 0;
+
+	if (pipe(_pipes)) {
+		list_free(&list);
+		return 0;
+	}
+
+	for (i = 0; i < 100; i++) {
+		list_insert(list, i, NULL);
+	}
+
+	if (
+		pthread_create(
+			&free_thread_handle,
+			NULL,
+			free_thread,
+			(void *) list
+		)
+	) {
+		close(_pipes[0]);
+		close(_pipes[1]);
+		list_free(&list);
+		return 0;
+	}
+
+	if (
+		pthread_create(
+			&compute_thread_handle,
+			NULL,
+			compute_thread,
+			(void *) list
+		)
+	) {
+		close(_pipes[0]);
+		close(_pipes[1]);
+		list_free(&list);
+		return 0;
+	}
+
+	sleep(1);
+	ret = func(list);
+	pthread_join(compute_thread_handle, &thread_ret);
+	if (thread_ret)
+		ret = 0;
+	pthread_join(free_thread_handle, &thread_ret);
+	if (thread_ret)
+		ret = 0;
+
+	return ret;
+}
+
+static int do_nothing(linked_list_t **list) {
+	return 1;
+}
+
+static int test_free_while_active() {
+	return with_freeing_list(do_nothing);
+}
+
+static int _test_free_while_freeing(linked_list_t **list) {
+	list_free(&list);
+	return 1;
+}
+static int test_free_while_freeing() {
+	return with_freeing_list(_test_free_while_freeing);
+}
+
+static int _test_size_while_freeing(linked_list_t **list) {
+	return list_size(list) == -1;
+}
+static int test_size_while_freeing() {
+	return with_freeing_list(_test_size_while_freeing);
+}
+
+static int _test_insert_while_freeing(linked_list_t **list) {
+	return list_insert(list, 1000, NULL) > 0;
+}
+static int test_insert_while_freeing() {
+	return with_freeing_list(_test_insert_while_freeing);
+}
+
+static int _test_remove_while_freeing(linked_list_t **list) {
+	return list_remove(list, 10) > 0;
+}
+static int test_remove_while_freeing() {
+	return with_freeing_list(_test_remove_while_freeing);
+}
+
+static int _test_contains_while_freeing(linked_list_t **list) {
+	return list_contains(list, 60) == 0;
+}
+static int test_contains_while_freeing() {
+	return with_freeing_list(_test_contains_while_freeing);
+}
+
+static int _test_update_node_while_freeing(linked_list_t **list) {
+	return list_update_node(list, 2, NULL) > 0;
+}
+static int test_update_node_while_freeing() {
+	return with_freeing_list(_test_update_node_while_freeing);
+}
+
+static int _test_node_compute_while_freeing(linked_list_t **list) {
+	void *res;
+	return list_node_compute(list, 2, get_ptr, &res) > 0;
+}
+static int test_node_compute_while_freeing() {
+	return with_freeing_list(_test_node_compute_while_freeing);
+}
+
+static int _test_batch_while_freeing(linked_list_t **list) {
+	op_t ops[100];
+	int i, ret = 1;
+
+	for (i = 0; i < 100; i++) {
+		ops[i].op = UPDATE;
+		ops[i].index = i;
+		ops[i].data = NULL;
+		ops[i].result = 44;
+	}
+	list_batch(list, 100, ops);
+	for (i = 0; i < 100; i++) {
+		if (ops[i].result != 44)
+			ret = 0;
+	}
+	return ret;
+}
+static int test_batch_while_freeing() {
+	return with_freeing_list(_test_batch_while_freeing);
+}
+
+
+#if FUZZ == 1
 static int _test_fuzz(linked_list_t **list) {
 	int i = 0;
 	for (i = 0; i < 400; i++) {
@@ -404,7 +578,7 @@ static int test_fuzz_insert_only() {
 }
 #endif //FUZZ
 
-#ifdef SIM
+#if SIM == 1
 #define SIM_SIZE 1000
 #define SIM_ITERS 100
 #define SIM_THREADS 400
@@ -483,11 +657,11 @@ static int _test_simulation(linked_list_t **list) {
 	}
 	return 1;
 }
-#endif // SIM
 
 static int test_simulation() {
 	return with_list(_test_simulation);
 }
+#endif // SIM
 #define DEFINE_TEST(func) { func, #func }
 
 struct test_def tests[] = {
@@ -532,11 +706,20 @@ struct test_def tests[] = {
 	DEFINE_TEST(test_batch_update),
 	DEFINE_TEST(test_batch_contains),
 	DEFINE_TEST(test_batch_compute),
-#ifdef FUZZ
+	DEFINE_TEST(test_free_while_active),
+	DEFINE_TEST(test_free_while_freeing),
+	DEFINE_TEST(test_size_while_freeing),
+	DEFINE_TEST(test_insert_while_freeing),
+	DEFINE_TEST(test_remove_while_freeing),
+	DEFINE_TEST(test_contains_while_freeing),
+	DEFINE_TEST(test_update_node_while_freeing),
+	DEFINE_TEST(test_node_compute_while_freeing),
+	DEFINE_TEST(test_batch_while_freeing),
+#if FUZZ == 1
 	DEFINE_TEST(test_fuzz),
 	DEFINE_TEST(test_fuzz_insert_only),
 #endif
-#ifdef SIM
+#if SIM == 1
 	DEFINE_TEST(test_simulation),
 #endif
 	{ NULL, "The end" },
